@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package*.json ./
 RUN npm ci
+RUN npm install --no-save @cloudflare/workerd-linux-64
 
 COPY . .
 
