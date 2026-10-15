@@ -27,7 +27,7 @@ const CORS: Record<string, string> = {
   "Access-Control-Allow-Headers": "Content-Type,Accept,Authorization,Mcp-Session-Id,x-api-key-511",
 };
 
-function createServer(apiKey: string): McpServer {
+export function createServer(apiKey: string): McpServer {
   const server = new McpServer({ name: "muni-mcp-server", version: "1.0.0" });
 
   server.registerTool("transit_operators", {
