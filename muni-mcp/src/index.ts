@@ -59,7 +59,7 @@ export function createServer(apiKey: string): McpServer {
 
   server.registerTool("muni_stops_nearby", {
     title: "Nearby Muni Stops",
-    description: "Find Muni stops near a latitude and longitude. Returns stop names, IDs, coordinates, distance, and available route metadata.",
+    description: "Find Muni stops near a latitude and longitude. Returns the nearest stop names and IDs with straight-line distances from the requested location in meters.",
     inputSchema: {
       latitude: z.number().min(-90).max(90).describe("WGS84 latitude"),
       longitude: z.number().min(-180).max(180).describe("WGS84 longitude"),
@@ -89,11 +89,11 @@ export function createServer(apiKey: string): McpServer {
       }).filter((item: any): item is { stop: any; lat: number; lon: number; meters: number } => item !== null && item.meters <= radius_meters)
         .sort((a: any, b: any) => a.meters - b.meters).slice(0, 25);
       if (!nearby.length) return ok(`No Muni stops found within ${radius_meters} meters.`);
-      const lines = [`# Muni Stops Near ${latitude}, ${longitude} (${nearby.length})\n`];
-      for (const { stop, lat, lon, meters } of nearby) {
+      const lines = [`# Nearby Muni Stops (${nearby.length}, nearest first)\n`, "Distances are straight-line distances from your location.\n"];
+      for (const { stop, meters } of nearby) {
         const id = stop.id || stop.Id || stop.StopId || stop.stop_id || stop.StopCode || stop.stop_code || "unknown";
         const name = stop.Name || stop.name || stop.Description || "Unnamed stop";
-        lines.push(`- **${name}** (stop ${id}) — ${Math.round(meters)} m — ${lat}, ${lon}`);
+        lines.push(`- **${name}** (stop ${id}) — ${Math.round(meters)} meters away`);
       }
       return ok(lines.join("\n"));
     } catch (err) { return fail(err); }
