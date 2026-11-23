@@ -1,10 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { arrivalForVisit, extractRouteDirections, extractStops, matchesDirection, nearbyStops, text, unwrapStopVisits } from "./nearby.js";
 
 interface Env { API_511_KEY?: string; }
 const API_511_BASE = "https://api.511.org/transit/";
 const MUNI_OPERATOR = "SF";
+const STATIC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const staticCache = new Map<string, { expiresAt: number; value: Promise<unknown> }>();
 
 async function fetch511(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
   const url = new URL(endpoint, API_511_BASE);
@@ -16,6 +19,32 @@ async function fetch511(apiKey: string, endpoint: string, params: Record<string,
   let text = await resp.text();
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   return JSON.parse(text);
+}
+
+function fetch511Cached(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+  const cacheKey = `${endpoint}?${new URLSearchParams(Object.entries(params).sort(([a], [b]) => a.localeCompare(b))).toString()}`;
+  const now = Date.now();
+  const cached = staticCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const value = fetch511(apiKey, endpoint, params).catch((error) => {
+    staticCache.delete(cacheKey);
+    throw error;
+  });
+  staticCache.set(cacheKey, { expiresAt: now + STATIC_CACHE_TTL_MS, value });
+  if (staticCache.size > 100) {
+    const oldest = [...staticCache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt)[0];
+    if (oldest) staticCache.delete(oldest[0]);
+  }
+  return value;
+}
+
+async function getMuniStops(apiKey: string) {
+  return extractStops(await fetch511Cached(apiKey, "stops", { operator_id: MUNI_OPERATOR }));
+}
+
+function normalized(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function ok(text: string) { return { content: [{ type: "text" as const, text }] }; }
@@ -57,43 +86,109 @@ export function createServer(apiKey: string): McpServer {
     } catch (err) { return fail(err); }
   });
 
-  server.registerTool("muni_stops_nearby", {
-    title: "Nearby Muni Stops",
-    description: "Find Muni stops near a latitude and longitude. Returns the nearest stop names and IDs with straight-line distances from the requested location in meters.",
+  server.registerTool("muni_departures_nearby", {
+    title: "Nearby Muni Departures",
+    description: "Find the closest Muni stop serving a route and direction near a location, then return the next real-time arrivals from that one stop. If you provide a route but no direction, this tool lists nearby direction choices so you can ask the rider which destination they want.",
     inputSchema: {
-      latitude: z.number().min(-90).max(90).describe("WGS84 latitude"),
-      longitude: z.number().min(-180).max(180).describe("WGS84 longitude"),
-      radius_meters: z.number().positive().max(10000).default(1000).describe("Search radius in meters (default 1000)"),
-      operator_id: z.string().default(MUNI_OPERATOR).describe("511 operator ID (default SF)"),
-      line_id: z.string().optional().describe("Optional route/line ID to narrow the search"),
+      latitude: z.number().min(-90).max(90).describe("WGS84 latitude of the rider"),
+      longitude: z.number().min(-180).max(180).describe("WGS84 longitude of the rider"),
+      line_id: z.string().optional().describe("Optional Muni route ID, such as 38 or N"),
+      direction: z.string().optional().describe("Optional direction name, destination, or 511 direction ID"),
+      radius_meters: z.number().positive().max(10000).default(1000).describe("Maximum stop distance (default 1000 meters)"),
+      count: z.number().int().positive().max(10).default(3).describe("Maximum arrivals to return (default 3)"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async ({ latitude, longitude, radius_meters, operator_id, line_id }) => {
+  }, async ({ latitude, longitude, line_id, direction, radius_meters, count }) => {
     try {
-      const params: Record<string, string> = { operator_id };
-      if (line_id) params.line_id = line_id;
-      const data: any = await fetch511(apiKey, "stops", params);
-      const stops = data?.Contents?.dataObjects?.ScheduledStopPoint || data?.Stops || data?.stops || (Array.isArray(data) ? data : []);
-      const radians = (value: number) => value * Math.PI / 180;
-      const distance = (lat: number, lon: number) => {
-        const earth = 6371000, dLat = radians(lat - latitude), dLon = radians(lon - longitude);
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(latitude)) * Math.cos(radians(lat)) * Math.sin(dLon / 2) ** 2;
-        return earth * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      };
-      const nearby = stops.map((stop: any) => {
-        const location = stop.Location || stop.location || stop.Centroid?.Location || stop.Place?.Centroid?.Location || {};
-        const lat = Number(stop.Latitude ?? stop.latitude ?? location.Latitude ?? location.latitude);
-        const lon = Number(stop.Longitude ?? stop.longitude ?? location.Longitude ?? location.longitude);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-        return { stop, lat, lon, meters: distance(lat, lon) };
-      }).filter((item: any): item is { stop: any; lat: number; lon: number; meters: number } => item !== null && item.meters <= radius_meters)
-        .sort((a: any, b: any) => a.meters - b.meters).slice(0, 25);
-      if (!nearby.length) return ok(`No Muni stops found within ${radius_meters} meters.`);
-      const lines = [`# Nearby Muni Stops (${nearby.length}, nearest first)\n`, "Distances are straight-line distances from your location.\n"];
-      for (const { stop, meters } of nearby) {
-        const id = stop.id || stop.Id || stop.StopId || stop.stop_id || stop.StopCode || stop.stop_code || "unknown";
-        const name = stop.Name || stop.name || stop.Description || "Unnamed stop";
-        lines.push(`- **${name}** (stop ${id}) — ${Math.round(meters)} meters away`);
+      if (direction && !line_id) return ok("Please provide a Muni route as well as the direction.");
+      const catalog = await getMuniStops(apiKey);
+      let candidates = catalog;
+      let selectedDirection: ReturnType<typeof extractRouteDirections>[number] | undefined;
+
+      if (line_id) {
+        const patterns = await fetch511Cached(apiKey, "patterns", { operator_id: MUNI_OPERATOR, line_id });
+        const directions = extractRouteDirections(patterns);
+        if (!directions.length) return ok(`I couldn't find route directions for Muni line ${line_id}.`);
+
+        const closestByDirection = (await Promise.all(directions.map(async (routeDirection) => {
+          let directionStops = catalog.filter((stop) => routeDirection.stopIds.has(stop.id));
+          if (!directionStops.length) {
+            const response = await fetch511Cached(apiKey, "stops", {
+              operator_id: MUNI_OPERATOR,
+              line_id,
+              Direction_id: routeDirection.id,
+            });
+            const byId = new Map(catalog.map((stop) => [stop.id, stop]));
+            directionStops = extractStops(response).map((stop) => byId.get(stop.id) ?? stop);
+          }
+          const nearby = nearbyStops(directionStops, latitude, longitude, radius_meters, 1)[0];
+          return { direction: routeDirection, stop: nearby };
+        }))).filter((item) => item.stop);
+
+        if (!closestByDirection.length) return ok(`No stops for Muni line ${line_id} were found within ${radius_meters} meters.`);
+
+        if (!direction) {
+          const options = closestByDirection.sort((a, b) => a.stop!.meters - b.stop!.meters);
+          if (options.length > 1) {
+            const lines = [`Which direction for Muni line ${line_id} do you want? Nearby options:`];
+            for (const option of options.slice(0, 6)) {
+              const name = option.direction.labels[0] ?? option.direction.id;
+              lines.push(`- ${name}, from ${option.stop!.name} (${Math.round(option.stop!.meters)} meters away)`);
+            }
+            return ok(lines.join("\n"));
+          }
+          selectedDirection = options[0].direction;
+          candidates = catalog.filter((stop) => selectedDirection!.stopIds.has(stop.id));
+        } else {
+          const matches = directions.filter((candidate) => matchesDirection(candidate, direction));
+          if (matches.length !== 1) {
+            const lines = matches.length
+              ? [`“${direction}” matches more than one direction for line ${line_id}. Please choose one:`]
+              : [`I couldn't match “${direction}” to a direction for Muni line ${line_id}. Available directions:`];
+            for (const item of directions) lines.push(`- ${item.labels[0] ?? item.id}`);
+            return ok(lines.join("\n"));
+          }
+          selectedDirection = matches[0];
+          candidates = catalog.filter((stop) => selectedDirection!.stopIds.has(stop.id));
+          if (!candidates.length) {
+            const directionalStops = extractStops(await fetch511Cached(apiKey, "stops", {
+              operator_id: MUNI_OPERATOR,
+              line_id,
+              Direction_id: selectedDirection.id,
+            }));
+            const byId = new Map(catalog.map((stop) => [stop.id, stop]));
+            candidates = directionalStops.map((stop) => byId.get(stop.id) ?? stop);
+          }
+        }
+      }
+
+      const closest = nearbyStops(candidates, latitude, longitude, radius_meters, 1)[0];
+      if (!closest) return ok(`No Muni stops were found within ${radius_meters} meters${line_id ? ` for line ${line_id}` : ""}.`);
+
+      // Fetch live predictions only for the single selected stop; static stop/pattern data is cached.
+      const response = await fetch511(apiKey, "StopMonitoring", { agency: MUNI_OPERATOR, stopCode: closest.stopCode });
+      const visits = unwrapStopVisits(response);
+      const arrivals = visits.flatMap((visit) => {
+        const arrival = arrivalForVisit(visit);
+        if (!arrival) return [];
+        const journey = visit.MonitoredVehicleJourney ?? visit.monitoredVehicleJourney;
+        const realtimeLineRef = text(journey?.LineRef ?? journey?.lineRef);
+        if (line_id && normalized(arrival.line) !== normalized(line_id) && normalized(realtimeLineRef) !== normalized(line_id)) return [];
+        if (selectedDirection) {
+          const directionRef = arrival.direction ?? "";
+          const destination = normalized(arrival.destination);
+          const directionMatch = directionRef && directionRef === selectedDirection.id;
+          const labelMatch = selectedDirection.labels.some((label) => destination.includes(normalized(label)) || normalized(label).includes(destination));
+          if (!directionMatch && !labelMatch) return [];
+        }
+        return [arrival];
+      }).sort((a, b) => Date.parse(a.expectedAt) - Date.parse(b.expectedAt)).slice(0, count);
+
+      if (!arrivals.length) return ok(`No live predictions${line_id ? ` for line ${line_id}${selectedDirection ? ` ${selectedDirection.labels[0] ?? selectedDirection.id}` : ""}` : ""} at ${closest.name} right now. I did not substitute scheduled times.`);
+      const heading = `# Next Muni arrivals${line_id ? ` — line ${line_id}` : ""}\n\nStop: **${closest.name}** (${Math.round(closest.meters)} meters away)`;
+      const lines = [heading];
+      for (const arrival of arrivals) {
+        lines.push(`- **${arrival.line}** → ${arrival.destination} — ${arrival.etaMinutes === 0 ? "arriving now" : `${arrival.etaMinutes} min`} (expected ${arrival.expectedAt})`);
       }
       return ok(lines.join("\n"));
     } catch (err) { return fail(err); }
@@ -211,7 +306,7 @@ export default {
         description: "SF Muni real-time transit data via MCP",
         mcp_endpoint: "/mcp",
         auth: "Pass your 511.org API key via the x-api-key-511 header. Get a free key at https://511.org/open-data/token",
-        tools: ["transit_operators", "muni_routes", "muni_departures", "muni_line", "muni_alerts", "muni_vehicles", "muni_schedule"],
+        tools: ["transit_operators", "muni_routes", "muni_departures", "muni_departures_nearby", "muni_line", "muni_alerts", "muni_vehicles", "muni_schedule"],
       }, null, 2), { headers: { "Content-Type": "application/json", ...CORS } });
     }
     if (url.pathname !== "/mcp") return new Response(JSON.stringify({ error: "Not found. MCP endpoint is at /mcp" }), { status: 404, headers: { "Content-Type": "application/json", ...CORS } });
