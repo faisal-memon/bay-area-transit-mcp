@@ -1,0 +1,25 @@
+name: Pull Request Build
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: muni-mcp/package-lock.json
+      - name: Install and build Worker
+        working-directory: muni-mcp
+        run: npm ci && npm run build
+      - name: Validate Docker build
+        run: docker build --tag muni-mcp:pr-${{ github.event.pull_request.number }} muni-mcp
