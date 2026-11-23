@@ -90,14 +90,13 @@ Use `mcp-remote` as a bridge:
 | `bart_advisories` | Current service advisories |
 | `bart_fare` | Fare lookup between two stations |
 
-### Muni (9 tools)
+### Muni (8 tools)
 
 | Tool | Description |
 |------|-------------|
 | `transit_operators` | List all 511 transit operators |
 | `muni_routes` | List all Muni routes |
 | `muni_departures` | Real-time departures from a stop |
-| `muni_stops_nearby` | Find nearby stops from latitude and longitude, with nearest-first distances in meters |
 | `muni_departures_nearby` | Find nearby real-time arrivals for a route and direction from the closest matching stop |
 | `muni_line` | Line details with stops |
 | `muni_alerts` | Current service alerts |

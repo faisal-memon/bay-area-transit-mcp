@@ -86,32 +86,6 @@ export function createServer(apiKey: string): McpServer {
     } catch (err) { return fail(err); }
   });
 
-  server.registerTool("muni_stops_nearby", {
-    title: "Nearby Muni Stops",
-    description: "Find Muni stops near a latitude and longitude. Returns the nearest stop names and IDs with straight-line distances from the requested location in meters.",
-    inputSchema: {
-      latitude: z.number().min(-90).max(90).describe("WGS84 latitude"),
-      longitude: z.number().min(-180).max(180).describe("WGS84 longitude"),
-      radius_meters: z.number().positive().max(10000).default(1000).describe("Search radius in meters (default 1000)"),
-      operator_id: z.string().default(MUNI_OPERATOR).describe("511 operator ID (default SF)"),
-      line_id: z.string().optional().describe("Optional route/line ID to narrow the search"),
-    },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async ({ latitude, longitude, radius_meters, operator_id, line_id }) => {
-    try {
-      const stops = operator_id === MUNI_OPERATOR && !line_id
-        ? await getMuniStops(apiKey)
-        : extractStops(await fetch511Cached(apiKey, "stops", { operator_id, ...(line_id ? { line_id } : {}) }));
-      const nearby = nearbyStops(stops, latitude, longitude, radius_meters, 25);
-      if (!nearby.length) return ok(`No Muni stops found within ${radius_meters} meters.`);
-      const lines = [`# Nearby Muni Stops (${nearby.length}, nearest first)\n`, "Distances are straight-line distances from your location.\n"];
-      for (const stop of nearby) {
-        lines.push(`- **${stop.name}** (stop ${stop.stopCode}) — ${Math.round(stop.meters)} meters away`);
-      }
-      return ok(lines.join("\n"));
-    } catch (err) { return fail(err); }
-  });
-
   server.registerTool("muni_departures_nearby", {
     title: "Nearby Muni Departures",
     description: "Find the closest Muni stop serving a route and direction near a location, then return the next real-time arrivals from that one stop. If you provide a route but no direction, this tool lists nearby direction choices so you can ask the rider which destination they want.",
@@ -332,7 +306,7 @@ export default {
         description: "SF Muni real-time transit data via MCP",
         mcp_endpoint: "/mcp",
         auth: "Pass your 511.org API key via the x-api-key-511 header. Get a free key at https://511.org/open-data/token",
-        tools: ["transit_operators", "muni_routes", "muni_departures", "muni_stops_nearby", "muni_departures_nearby", "muni_line", "muni_alerts", "muni_vehicles", "muni_schedule"],
+        tools: ["transit_operators", "muni_routes", "muni_departures", "muni_departures_nearby", "muni_line", "muni_alerts", "muni_vehicles", "muni_schedule"],
       }, null, 2), { headers: { "Content-Type": "application/json", ...CORS } });
     }
     if (url.pathname !== "/mcp") return new Response(JSON.stringify({ error: "Not found. MCP endpoint is at /mcp" }), { status: 404, headers: { "Content-Type": "application/json", ...CORS } });
