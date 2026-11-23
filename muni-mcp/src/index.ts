@@ -21,7 +21,7 @@ async function fetch511(apiKey: string, endpoint: string, params: Record<string,
   return JSON.parse(text);
 }
 
-async function fetch511Static(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+async function fetch511Cached(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
   const cacheKey = `${endpoint}?${new URLSearchParams(Object.entries(params).sort(([a], [b]) => a.localeCompare(b))).toString()}`;
   const now = Date.now();
   const cached = staticCache.get(cacheKey);
@@ -40,7 +40,7 @@ async function fetch511Static(apiKey: string, endpoint: string, params: Record<s
 }
 
 async function getMuniStops(apiKey: string) {
-  return extractStops(await fetch511Static(apiKey, "stops", { operator_id: MUNI_OPERATOR }));
+  return extractStops(await fetch511Cached(apiKey, "stops", { operator_id: MUNI_OPERATOR }));
 }
 
 function normalized(value: string | undefined): string {
@@ -101,7 +101,7 @@ export function createServer(apiKey: string): McpServer {
     try {
       const stops = operator_id === MUNI_OPERATOR && !line_id
         ? await getMuniStops(apiKey)
-        : extractStops(await fetch511Static(apiKey, "stops", { operator_id, ...(line_id ? { line_id } : {}) }));
+        : extractStops(await fetch511Cached(apiKey, "stops", { operator_id, ...(line_id ? { line_id } : {}) }));
       const nearby = nearbyStops(stops, latitude, longitude, radius_meters, 25);
       if (!nearby.length) return ok(`No Muni stops found within ${radius_meters} meters.`);
       const lines = [`# Nearby Muni Stops (${nearby.length}, nearest first)\n`, "Distances are straight-line distances from your location.\n"];
@@ -132,14 +132,14 @@ export function createServer(apiKey: string): McpServer {
       let selectedDirection: ReturnType<typeof extractRouteDirections>[number] | undefined;
 
       if (line_id) {
-        const patterns = await fetch511Static(apiKey, "patterns", { operator_id: MUNI_OPERATOR, line_id });
+        const patterns = await fetch511Cached(apiKey, "patterns", { operator_id: MUNI_OPERATOR, line_id });
         const directions = extractRouteDirections(patterns);
         if (!directions.length) return ok(`I couldn't find route directions for Muni line ${line_id}.`);
 
         const closestByDirection = (await Promise.all(directions.map(async (routeDirection) => {
           let directionStops = catalog.filter((stop) => routeDirection.stopIds.has(stop.id));
           if (!directionStops.length) {
-            const response = await fetch511Static(apiKey, "stops", {
+            const response = await fetch511Cached(apiKey, "stops", {
               operator_id: MUNI_OPERATOR,
               line_id,
               Direction_id: routeDirection.id,
@@ -177,7 +177,7 @@ export function createServer(apiKey: string): McpServer {
           selectedDirection = matches[0];
           candidates = catalog.filter((stop) => selectedDirection!.stopIds.has(stop.id));
           if (!candidates.length) {
-            const directionalStops = extractStops(await fetch511Static(apiKey, "stops", {
+            const directionalStops = extractStops(await fetch511Cached(apiKey, "stops", {
               operator_id: MUNI_OPERATOR,
               line_id,
               Direction_id: selectedDirection.id,
