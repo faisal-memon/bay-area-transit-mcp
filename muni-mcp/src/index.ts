@@ -21,7 +21,7 @@ async function fetch511(apiKey: string, endpoint: string, params: Record<string,
   return JSON.parse(text);
 }
 
-async function fetch511Cached(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+function fetch511Cached(apiKey: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
   const cacheKey = `${endpoint}?${new URLSearchParams(Object.entries(params).sort(([a], [b]) => a.localeCompare(b))).toString()}`;
   const now = Date.now();
   const cached = staticCache.get(cacheKey);
